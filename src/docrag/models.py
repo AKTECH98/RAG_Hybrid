@@ -35,6 +35,9 @@ class Chunk(BaseModel):
     text: str
     heading: str = ""
     page: int | None = None
+    # The naive fixed-size baseline embeds raw windows; structure-aware strategies prepend
+    # the heading path so a chunk like "Use Explicit Typing" knows it's about JWTs.
+    embed_with_heading: bool = True
 
     @property
     def char_count(self) -> int:
@@ -42,8 +45,10 @@ class Chunk(BaseModel):
 
     @property
     def embed_text(self) -> str:
-        """Text sent to the embedder: the heading path gives the chunk its context."""
-        return f"{self.heading}\n\n{self.text}" if self.heading else self.text
+        """Text sent to the embedder (and BM25)."""
+        if self.embed_with_heading and self.heading:
+            return f"{self.heading}\n\n{self.text}"
+        return self.text
 
     @staticmethod
     def make_id(doc_id: str, strategy: str, index: int, text: str) -> str:
