@@ -1,4 +1,4 @@
-"""Thin OpenAI chat wrapper: structured (pydantic) outputs, retries, and a response cache.
+"""LLM clients (OpenAI, Ollama): structured (pydantic) outputs, retries, response cache.
 
 The cache key is the full request (model, messages, schema, temperature), so re-running an
 eval or a demo with identical inputs costs nothing and returns identical outputs.
@@ -114,11 +114,101 @@ class OpenAILLM:
         return msg.parsed
 
 
-_llm: OpenAILLM | None = None
+class OllamaLLM:
+    """Ollama via its native /api/chat endpoint.
+
+    Not the OpenAI-compatible /v1 layer, because only the native API lets each request set
+    `num_ctx` (the server default of 2048 tokens silently drops the *start* of longer
+    prompts, i.e. the system prompt and first sources) and `think`. Structured outputs use
+    Ollama's `format` = JSON schema, which constrains decoding to valid JSON.
+    """
+
+    def __init__(self, settings: Settings | None = None, use_cache: bool = True):
+        import httpx
+
+        s = settings or get_settings()
+        self.client = httpx.Client(base_url=s.ollama_base_url, timeout=s.ollama_timeout_s)
+        self.num_ctx = s.ollama_num_ctx
+        self.think = s.ollama_think
+        self.cache = ResponseCache(s.cache_dir / "llm.sqlite") if use_cache else None
+        self.usage: dict[str, dict[str, int]] = {}
+        self._usage_lock = threading.Lock()
+
+    def _chat(self, model: str, system: str, user: str, temperature: float, fmt=None) -> str:
+        body = {
+            "model": model,
+            "stream": False,
+            "think": self.think,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "options": {"temperature": temperature, "num_ctx": self.num_ctx},
+        }
+        if fmt is not None:
+            body["format"] = fmt
+        resp = self.client.post("/api/chat", json=body)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Ollama chat failed ({resp.status_code}): {resp.text[:300]}")
+        data = resp.json()
+        prompt_tokens = data.get("prompt_eval_count", 0)
+        if prompt_tokens >= self.num_ctx:
+            raise RuntimeError(
+                f"Prompt filled the whole {self.num_ctx}-token context and was truncated; "
+                "raise DOCRAG_OLLAMA_NUM_CTX"
+            )
+        with self._usage_lock:
+            u = self.usage.setdefault(model, {"input": 0, "output": 0, "calls": 0})
+            u["input"] += prompt_tokens
+            u["output"] += data.get("eval_count", 0)
+            u["calls"] += 1
+        return data["message"]["content"]
+
+    def generate(self, model: str, system: str, user: str, temperature: float = 0.0) -> str:
+        key = ResponseCache.key(kind="text", model=model, s=system, u=user, t=temperature)
+        if self.cache and (hit := self.cache.get(key)) is not None:
+            return hit
+        text = self._chat(model, system, user, temperature)
+        if self.cache:
+            self.cache.put(key, text)
+        return text
+
+    def structured(
+        self, model: str, system: str, user: str, schema: type[T], temperature: float = 0.0
+    ) -> T:
+        json_schema = schema.model_json_schema()
+        key = ResponseCache.key(
+            kind="json", model=model, s=system, u=user, t=temperature, schema=json_schema
+        )
+        if self.cache and (hit := self.cache.get(key)) is not None:
+            return schema.model_validate_json(hit)
+        # The schema also goes in the prompt: with only the grammar constraint, qwen3-4b took
+        # the cheapest valid path and returned {"scores": []} for every reranking call.
+        system = f"{system}\n\nRespond only with JSON matching this JSON schema:\n" + json.dumps(
+            json_schema
+        )
+        # Small models occasionally emit schema-valid JSON that breaks a field constraint
+        # (e.g. a score of 11, an empty list); retry once with the validation error appended.
+        prompt, last_error = user, None
+        for _ in range(2):
+            raw = self._chat(model, system, prompt, temperature, fmt=json_schema)
+            try:
+                parsed = schema.model_validate_json(raw)
+                break
+            except ValueError as e:
+                last_error = e
+                prompt = f"{user}\n\nYour previous output was invalid ({e}). Return valid JSON."
+        else:
+            raise RuntimeError(f"Model returned invalid JSON twice: {last_error}")
+        if self.cache:
+            self.cache.put(key, parsed.model_dump_json())
+        return parsed
 
 
-def get_llm(settings: Settings | None = None) -> OpenAILLM:
-    global _llm
-    if _llm is None:
-        _llm = OpenAILLM(settings)
-    return _llm
+_llms: dict[str, LLM] = {}
+_llms_lock = threading.Lock()
+
+
+def get_llm(settings: Settings | None = None) -> LLM:
+    s = settings or get_settings()
+    with _llms_lock:
+        if s.llm_provider not in _llms:
+            _llms[s.llm_provider] = OllamaLLM(s) if s.llm_provider == "ollama" else OpenAILLM(s)
+        return _llms[s.llm_provider]

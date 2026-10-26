@@ -4,6 +4,9 @@ Usage:
   uv run python scripts/seed.py                       # all strategies
   uv run python scripts/seed.py --strategy recursive  # just one
   uv run python scripts/seed.py --reset               # wipe indexes first
+  uv run python scripts/seed.py --embedder local      # index with another embedder
+
+Each embedder gets its own index under data/index/<provider>-<model>/.
 """
 
 import argparse
@@ -11,7 +14,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from docrag.config import CHUNK_STRATEGIES, get_settings
+from docrag.config import CHUNK_STRATEGIES, EMBEDDING_PROVIDERS, get_settings
 from docrag.index.embedder import get_embedder
 from docrag.index.indexer import Indexer
 from docrag.ingest.loaders import supported
@@ -23,9 +26,16 @@ def main() -> None:
     parser.add_argument("--strategy", choices=[*CHUNK_STRATEGIES, "all"], default="all")
     parser.add_argument("--corpus", type=Path, default=None, help="defaults to ./corpus")
     parser.add_argument("--reset", action="store_true", help="drop existing indexes first")
+    parser.add_argument(
+        "--embedder", choices=EMBEDDING_PROVIDERS, help="defaults to DOCRAG_EMBEDDING_PROVIDER"
+    )
+    parser.add_argument("--embedding-model", help="override the provider's default model")
     args = parser.parse_args()
 
     settings = get_settings()
+    if args.embedder:
+        settings = settings.with_embedder(args.embedder, args.embedding_model)
+    print(f"Embedder: {settings.embedding_provider} / {settings.embedding_model_name}")
     corpus = args.corpus or settings.corpus_dir
     strategies = CHUNK_STRATEGIES if args.strategy == "all" else (args.strategy,)
     files = sorted(p for p in corpus.rglob("*") if p.is_file() and supported(p))
@@ -40,7 +50,7 @@ def main() -> None:
 
     indexer = Indexer(get_embedder(settings), settings)
     if args.reset:
-        settings.data_dir.joinpath("dedup_log.jsonl").unlink(missing_ok=True)
+        settings.index_dir.joinpath("dedup_log.jsonl").unlink(missing_ok=True)
         for s in strategies:
             indexer.reset(s)
 

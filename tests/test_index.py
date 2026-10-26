@@ -88,3 +88,15 @@ def test_concurrent_queries_do_not_deadlock(indexer, embedder):
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda v: vectors.query(v, 3), queries))
     assert len(results) == 64 and all(len(r) == 3 for r in results)
+
+
+def test_same_topic_but_different_text_is_not_a_duplicate(indexer):
+    """Regression: embedding similarity alone dropped distinct passages (bge-base)."""
+    shared = "background task response starlette " * 40
+    a = make_doc("a.md", [(["A"], shared + "runs once after the response is sent")])
+    b = make_doc("b.md", [(["B"], shared + "if one raises, later tasks never execute")])
+    (stats,) = indexer.index_documents([a, b], ("recursive",))
+    assert stats.duplicates == 0  # cosine is high, but the words that differ matter
+    copy = make_doc("c.md", [(["C"], shared + "runs once after the response is sent")])
+    (stats,) = indexer.index_documents([copy], ("recursive",))
+    assert stats.duplicates == 1 and stats.duplicate_examples[0].jaccard == 1.0

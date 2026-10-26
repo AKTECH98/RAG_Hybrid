@@ -15,7 +15,7 @@ system is not grading itself.
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from docrag.eval.dataset import GoldenCase, chunk_matches
 from docrag.generation.citations import parse_claims, verify_claims
@@ -47,6 +47,9 @@ class CaseResult(BaseModel):
     unsupported_pairs: list[str] = []
     confidence: float | None = None
     confidence_label: str | None = None
+    top_relevance: float | None = None  # calibrated relevance of the #1 result
+    top_cosine: float | None = None  # best raw dense similarity in the candidate pool
+    retrieval_confidence: float | None = None  # the value the abstain gate compares
     latency_ms: float = 0.0
     sources: list[str] = []
     error: str | None = None
@@ -119,7 +122,7 @@ class _Grounded(BaseModel):
 
 
 class _Faithfulness(BaseModel):
-    claims: list[_Grounded]
+    claims: list[_Grounded] = Field(min_length=1)
 
 
 FAITHFULNESS_SYSTEM = """You check whether statements are grounded in a set of context \

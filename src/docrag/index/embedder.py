@@ -1,7 +1,11 @@
-"""Embedding with an on-disk cache.
+"""Embedders with an on-disk cache: OpenAI, local sentence-transformers, or Ollama.
 
 Every text is keyed by sha1(model|text) in a SQLite cache, so re-chunking, re-indexing and
 eval runs only pay for text that was never embedded before.
+
+Retrieval-tuned models embed queries and documents differently: bge expects an
+instruction in front of queries, nomic-embed-text expects "search_query: " /
+"search_document: " prefixes. `embed` is for documents, `embed_query` for queries.
 """
 
 import hashlib
@@ -16,14 +20,15 @@ import tiktoken
 from docrag.config import Settings, get_settings
 
 MAX_INPUT_TOKENS = 8000  # text-embedding-3 limit is 8191
-BATCH_SIZE = 256
 
 
 class Embedder(Protocol):
-    dim: int
-
     def embed(self, texts: list[str]) -> np.ndarray:
-        """Return an (n, dim) float32 array of L2-normalized vectors."""
+        """Documents -> (n, dim) float32 array of L2-normalized vectors."""
+        ...
+
+    def embed_query(self, text: str) -> np.ndarray:
+        """One query -> (dim,) L2-normalized vector."""
         ...
 
 
@@ -59,21 +64,56 @@ class EmbeddingCache:
             self.conn.commit()
 
 
-class OpenAIEmbedder:
-    def __init__(self, settings: Settings | None = None):
-        from openai import OpenAI
+class CachedEmbedder:
+    """Base class: prefixes, caching and batching. Subclasses implement `_embed_batch`."""
 
-        s = settings or get_settings()
-        if not s.openai_api_key:
-            raise RuntimeError("OPENAI_API_KEY is not set (add it to .env)")
-        self.client = OpenAI(api_key=s.openai_api_key, max_retries=5)
-        self.model = s.embedding_model
-        self.dim = 1536
-        self.cache = EmbeddingCache(s.cache_dir / "embeddings.sqlite")
-        self.enc = tiktoken.get_encoding("cl100k_base")
+    model: str
+    query_prefix: str = ""
+    document_prefix: str = ""
+    batch_size: int = 64
+
+    def __init__(self, settings: Settings):
+        self.model = settings.embedding_model_name
+        self.cache = EmbeddingCache(settings.cache_dir / "embeddings.sqlite")
+
+    def _embed_batch(self, texts: list[str]) -> np.ndarray:
+        raise NotImplementedError
 
     def _key(self, text: str) -> str:
         return hashlib.sha1(f"{self.model}|{text}".encode()).hexdigest()
+
+    def _embed_cached(self, texts: list[str]) -> np.ndarray:
+        if not texts:
+            return np.zeros((0, 0), dtype=np.float32)
+        keys = [self._key(t) for t in texts]
+        cached = self.cache.get_many(list(set(keys)))
+        missing = list({k: t for k, t in zip(keys, texts, strict=True) if k not in cached}.items())
+        for i in range(0, len(missing), self.batch_size):
+            batch = missing[i : i + self.batch_size]
+            vecs = self._embed_batch([t or " " for _, t in batch])
+            new = {k: v for (k, _), v in zip(batch, vecs, strict=True)}
+            self.cache.put_many(new)
+            cached.update(new)
+        return _normalize(np.stack([cached[k] for k in keys]))
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        return self._embed_cached([self.document_prefix + t for t in texts])
+
+    def embed_query(self, text: str) -> np.ndarray:
+        return self._embed_cached([self.query_prefix + text])[0]
+
+
+class OpenAIEmbedder(CachedEmbedder):
+    batch_size = 256
+
+    def __init__(self, settings: Settings):
+        from openai import OpenAI
+
+        super().__init__(settings)
+        if not settings.openai_api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set (add it to .env)")
+        self.client = OpenAI(api_key=settings.openai_api_key, max_retries=5)
+        self.enc = tiktoken.get_encoding("cl100k_base")
 
     def _truncate(self, text: str) -> str:
         tokens = self.enc.encode(text, disallowed_special=())
@@ -81,24 +121,71 @@ class OpenAIEmbedder:
             self.enc.decode(tokens[:MAX_INPUT_TOKENS]) if len(tokens) > MAX_INPUT_TOKENS else text
         )
 
-    def embed(self, texts: list[str]) -> np.ndarray:
-        if not texts:
-            return np.zeros((0, self.dim), dtype=np.float32)
-        keys = [self._key(t) for t in texts]
-        cached = self.cache.get_many(list(set(keys)))
-        missing = list({k: t for k, t in zip(keys, texts, strict=True) if k not in cached}.items())
-        for i in range(0, len(missing), BATCH_SIZE):
-            batch = missing[i : i + BATCH_SIZE]
-            resp = self.client.embeddings.create(
-                model=self.model, input=[self._truncate(t) or " " for _, t in batch]
+    def _embed_batch(self, texts: list[str]) -> np.ndarray:
+        resp = self.client.embeddings.create(
+            model=self.model, input=[self._truncate(t) for t in texts]
+        )
+        return np.array([d.embedding for d in resp.data], dtype=np.float32)
+
+
+# Query instructions recommended by each model's authors (documents get none for bge).
+LOCAL_QUERY_PREFIXES = {
+    "BAAI/bge-base-en-v1.5": "Represent this sentence for searching relevant passages: ",
+    "BAAI/bge-small-en-v1.5": "Represent this sentence for searching relevant passages: ",
+}
+
+
+class LocalEmbedder(CachedEmbedder):
+    """sentence-transformers on this machine (Apple GPU / CUDA / CPU). Inputs beyond the
+    model's max sequence length (512 tokens for bge) are truncated by the model."""
+
+    batch_size = 64
+
+    def __init__(self, settings: Settings):
+        super().__init__(settings)
+        self.query_prefix = LOCAL_QUERY_PREFIXES.get(self.model, "")
+        self._st = None
+        self._lock = threading.Lock()
+
+    def _embed_batch(self, texts: list[str]) -> np.ndarray:
+        with self._lock:  # one torch model shared across threads; load it once
+            if self._st is None:
+                from sentence_transformers import SentenceTransformer
+
+                self._st = SentenceTransformer(self.model)
+            return np.asarray(
+                self._st.encode(texts, batch_size=32, normalize_embeddings=True),
+                dtype=np.float32,
             )
-            new = {
-                k: np.asarray(d.embedding, dtype=np.float32)
-                for (k, _), d in zip(batch, resp.data, strict=True)
-            }
-            self.cache.put_many(new)
-            cached.update(new)
-        return _normalize(np.stack([cached[k] for k in keys]))
+
+
+OLLAMA_PREFIXES = {  # (query, document)
+    "nomic-embed-text": ("search_query: ", "search_document: "),
+}
+
+
+class OllamaEmbedder(CachedEmbedder):
+    """Ollama's native /api/embed endpoint (batched)."""
+
+    batch_size = 32
+
+    def __init__(self, settings: Settings):
+        import httpx
+
+        super().__init__(settings)
+        base = self.model.split(":")[0]
+        self.query_prefix, self.document_prefix = OLLAMA_PREFIXES.get(base, ("", ""))
+        self.client = httpx.Client(
+            base_url=settings.ollama_base_url, timeout=settings.ollama_timeout_s
+        )
+
+    def _embed_batch(self, texts: list[str]) -> np.ndarray:
+        resp = self.client.post(
+            "/api/embed", json={"model": self.model, "input": texts, "truncate": True}
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Ollama embed failed ({resp.status_code}): {resp.text[:300]}")
+        return np.array(resp.json()["embeddings"], dtype=np.float32)
 
 
 class HashEmbedder:
@@ -119,6 +206,19 @@ class HashEmbedder:
                 out[i, h % self.dim] += 1.0
         return _normalize(out)
 
+    def embed_query(self, text: str) -> np.ndarray:
+        return self.embed([text])[0]
+
+
+_embedders: dict[str, Embedder] = {}
+_embedders_lock = threading.Lock()
+
 
 def get_embedder(settings: Settings | None = None) -> Embedder:
-    return OpenAIEmbedder(settings)
+    """One shared embedder per (provider, model)."""
+    s = settings or get_settings()
+    with _embedders_lock:
+        if s.index_slug not in _embedders:
+            cls = {"openai": OpenAIEmbedder, "local": LocalEmbedder, "ollama": OllamaEmbedder}
+            _embedders[s.index_slug] = cls[s.embedding_provider](s)
+        return _embedders[s.index_slug]

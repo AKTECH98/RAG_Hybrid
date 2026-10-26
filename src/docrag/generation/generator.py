@@ -45,7 +45,7 @@ class Generator:
     def answer_from(self, question: str, res: RetrievalResult, verify: bool = True) -> Answer:
         s = self.settings
         sources = [
-            Source.from_retrieved(n, rc, calibrated_relevance(rc))
+            Source.from_retrieved(n, rc, calibrated_relevance(rc, s.cosine_band_resolved))
             for n, rc in enumerate(res.results, start=1)
         ]
         retrieval = retrieval_confidence([src.relevance for src in sources])

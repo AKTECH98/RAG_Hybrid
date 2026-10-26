@@ -7,25 +7,31 @@ Each part is 0..1 and returned on its own, so a low score says *why* it is low.
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from docrag.generation.models import Claim, Confidence
 from docrag.llm import LLM
 from docrag.models import RetrievedChunk
 
-# Raw cosine similarities from text-embedding-3-small sit in a narrow band. Measured on
-# this corpus: off-topic questions top out at 0.13-0.23, near-domain questions the docs
-# don't answer (Django upload limits, FastAPI + MongoDB) at 0.46-0.49, and answerable
-# questions at 0.59-0.73. Map 0.45..0.65 onto 0..1 when no reranker ran.
-COSINE_FLOOR = 0.45
-COSINE_CEIL = 0.65
+DEFAULT_BAND = (0.45, 0.65)
 
 
-def calibrated_relevance(rc: RetrievedChunk) -> float:
+def calibrated_relevance(rc: RetrievedChunk, band: tuple[float, float] = DEFAULT_BAND) -> float:
+    """0..1 relevance from the cosine similarity (mapped through the embedder's band) and
+    the reranker score, averaged when both exist.
+
+    Measured on the golden set (retrieval-only sweep): as an "is this answerable?" signal,
+    raw cosine separates answerable from unanswerable questions with AUC 0.90-0.96, while
+    the MS MARCO cross-encoder's score only reaches 0.85-0.89 (it rewards topical overlap).
+    The average matches cosine (+/-0.01) without discarding a strong reranker's judgement.
+    """
+    parts = []
+    if rc.dense_score is not None:
+        floor, ceil = band
+        parts.append(min(max((rc.dense_score - floor) / (ceil - floor), 0.0), 1.0))
     if rc.rerank_score is not None:
-        return rc.rerank_score  # rerankers already emit 0..1 relevance
-    cos = rc.dense_score or 0.0
-    return min(max((cos - COSINE_FLOOR) / (COSINE_CEIL - COSINE_FLOOR), 0.0), 1.0)
+        parts.append(rc.rerank_score)
+    return sum(parts) / len(parts) if parts else 0.0
 
 
 def retrieval_confidence(relevances: list[float]) -> float:
@@ -51,7 +57,7 @@ class _Part(BaseModel):
 
 
 class _Parts(BaseModel):
-    parts: list[_Part]
+    parts: list[_Part] = Field(min_length=1)
 
 
 COMPLETENESS_SYSTEM = """You check whether an answer addresses everything a question asks.

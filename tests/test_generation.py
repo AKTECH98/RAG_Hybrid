@@ -34,6 +34,8 @@ raise HTTPException(status_code=404)  # [9] inside code is ignored
 - The `detail` can be any JSON-serializable value [2].
 - Custom headers are supported. [3]
 The provided documentation does not cover rate limiting.
+Therefore, it does not cover the failure handling of multiple tasks.
+It does not mention pagination at all.
 Short."""
     claims = parse_claims(answer, n_sources=3)
     assert [c.text for c in claims] == [
@@ -70,10 +72,17 @@ def _rc(dense=None, rerank=None) -> RetrievedChunk:
 
 
 def test_relevance_calibration():
-    assert calibrated_relevance(_rc(dense=0.9, rerank=0.2)) == 0.2  # reranker wins
-    assert calibrated_relevance(_rc(dense=0.30)) == 0.0
-    assert calibrated_relevance(_rc(dense=0.55)) == pytest.approx(0.5)
-    assert calibrated_relevance(_rc(dense=0.80)) == 1.0
+    band = (0.45, 0.65)
+    assert calibrated_relevance(_rc(dense=0.30), band) == 0.0
+    assert calibrated_relevance(_rc(dense=0.55), band) == pytest.approx(0.5)
+    assert calibrated_relevance(_rc(dense=0.80), band) == 1.0
+    # cosine and reranker are averaged; either alone is used as is
+    assert calibrated_relevance(_rc(dense=0.65, rerank=0.2), band) == pytest.approx(0.6)
+    assert calibrated_relevance(_rc(rerank=0.2), band) == 0.2
+    assert calibrated_relevance(_rc(), band) == 0.0
+    # a bge-scale cosine (0.75) is "certain" under OpenAI's band but middling under bge's
+    assert calibrated_relevance(_rc(dense=0.75), band) == 1.0
+    assert calibrated_relevance(_rc(dense=0.75), (0.70, 0.78)) == pytest.approx(0.625)
 
 
 def test_retrieval_confidence_and_coverage_math():
@@ -190,7 +199,8 @@ def test_hallucinated_citation_is_flagged(settings):
 
 
 def test_missing_judge_verdict_counts_as_unsupported(settings):
-    llm = _llm("Raise `HTTPException` with a code [1].", verdicts=[])
+    other = {"claim_id": 99, "source": 1, "verdict": "supported", "reason": "wrong pair"}
+    llm = _llm("Raise `HTTPException` with a code [1].", verdicts=[other])
     ans = Generator(None, llm, settings).answer_from("q", GOOD)
     assert ans.claims[0].checks[0].verdict == "unsupported"
     assert "no verdict" in ans.claims[0].checks[0].reason

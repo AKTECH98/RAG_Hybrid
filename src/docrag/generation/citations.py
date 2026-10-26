@@ -10,7 +10,7 @@ A citation is only as good as the chunk behind it: models routinely attach a rea
 
 import re
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from docrag.generation.models import CitationCheck, Claim, Source, Verdict
 from docrag.llm import LLM
@@ -29,7 +29,9 @@ TRANSITION_RE = re.compile(
 # "The provided documentation does not cover X" is a statement about the context, not a
 # factual claim that needs a citation.
 GAP_RE = re.compile(
-    r"\b(context|documentation|docs|sources?|provided (?:text|information))\b.{0,60}"
+    # "it"/"this" usually refers back to the context ("Therefore, it does not cover ...")
+    r"(\b(context|documentation|docs|sources?|provided (?:text|information))\b.{0,60}"
+    r"|^(?:\w+,\s*)?(?:it|this|they)\s)"
     r"\b(does not|doesn't|do not|don't|not)\b.{0,20}"
     r"\b(cover|mention|include|specify|say|describe|address|contain|provide|explain)",
     re.I,
@@ -99,7 +101,7 @@ class _Verdict(BaseModel):
 
 
 class _Verdicts(BaseModel):
-    verdicts: list[_Verdict]
+    verdicts: list[_Verdict] = Field(min_length=1)
 
 
 VERIFY_SYSTEM = """You verify citations in an answer generated from documentation.

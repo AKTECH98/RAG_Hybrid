@@ -63,7 +63,7 @@ class Indexer:
         self.embedder = embedder
         self.client = client or get_chroma_client(self.settings)
         self._indexes: dict[str, StrategyIndex] = {}
-        self.dedup_log = self.settings.data_dir / "dedup_log.jsonl"
+        self.dedup_log = self.settings.index_dir / "dedup_log.jsonl"
 
     def index(self, strategy: ChunkStrategy) -> StrategyIndex:
         if strategy not in self._indexes:
@@ -95,7 +95,12 @@ class Indexer:
             vecs = all_vecs[offset : offset + len(chunks)]
             offset += len(chunks)
             keep, dups = split_duplicates(
-                chunks, vecs, idx.vectors, self.settings.dedup_threshold, idx.chunks.chunks
+                chunks,
+                vecs,
+                idx.vectors,
+                self.settings.dedup_threshold,
+                idx.chunks.chunks,
+                self.settings.dedup_min_jaccard,
             )
             kept = [chunks[i] for i in keep]
             if kept:

@@ -63,7 +63,7 @@ class _PassageScore(BaseModel):
 
 
 class _Scores(BaseModel):
-    scores: list[_PassageScore]
+    scores: list[_PassageScore] = Field(min_length=1)
 
 
 LLM_RERANK_SYSTEM = """You are a search relevance judge for technical documentation.

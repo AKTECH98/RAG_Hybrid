@@ -8,4 +8,4 @@ def dense_search(
     vectors: VectorStore, embedder: Embedder, query: str, k: int
 ) -> list[tuple[str, float]]:
     """Top-k (chunk_id, cosine similarity), best first."""
-    return vectors.query(embedder.embed([query])[0], k)
+    return vectors.query(embedder.embed_query(query), k)
