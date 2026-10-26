@@ -54,6 +54,11 @@ class Chunk(BaseModel):
     def make_id(doc_id: str, strategy: str, index: int, text: str) -> str:
         return hashlib.sha1(f"{doc_id}|{strategy}|{index}|{text}".encode()).hexdigest()
 
+    def citation_label(self) -> str:
+        """Human-readable source, e.g. "fastapi/body.md › Request Body > Results (p. 4)"."""
+        label = f"{self.doc_id} › {self.heading}" if self.heading else self.doc_id
+        return f"{label} (p. {self.page})" if self.page else label
+
     def metadata(self) -> dict:
         """Flat metadata for Chroma (only scalar values allowed; None is dropped)."""
         meta = {
@@ -66,3 +71,24 @@ class Chunk(BaseModel):
         if self.page is not None:
             meta["page"] = self.page
         return meta
+
+
+class RetrievedChunk(BaseModel):
+    """A chunk plus its rank/score at every retrieval stage (ranks are 1-based)."""
+
+    chunk: Chunk
+    dense_rank: int | None = None
+    dense_score: float | None = None  # cosine similarity
+    sparse_rank: int | None = None
+    sparse_score: float | None = None  # raw BM25
+    fused_rank: int | None = None
+    fused_score: float | None = None  # weighted RRF
+    rerank_score: float | None = None  # 0..1 relevance from the reranker
+    final_rank: int | None = None
+
+    @property
+    def relevance(self) -> float:
+        """Best available 0..1 relevance estimate: reranker score, else cosine similarity."""
+        if self.rerank_score is not None:
+            return self.rerank_score
+        return max(self.dense_score or 0.0, 0.0)

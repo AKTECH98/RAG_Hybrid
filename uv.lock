@@ -854,6 +854,7 @@ wheels = [
 name = "docrag"
 version = "0.1.0"
 source = { editable = "." }
+default-groups = ["dev", "rerank"]
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "chromadb" },
@@ -872,15 +873,13 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
 ]
 
-[package.optional-dependencies]
-local-rerank = [
-    { name = "sentence-transformers" },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
     { name = "ruff" },
+]
+rerank = [
+    { name = "sentence-transformers" },
 ]
 
 [package.metadata]
@@ -896,18 +895,17 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.16.1" },
     { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "rank-bm25", specifier = ">=0.2.2" },
-    { name = "sentence-transformers", marker = "extra == 'local-rerank'", specifier = ">=6.2.0" },
     { name = "streamlit", specifier = ">=1.66.1" },
     { name = "tiktoken", specifier = ">=0.14.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
 ]
-provides-extras = ["local-rerank"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.17.2" },
 ]
+rerank = [{ name = "sentence-transformers", specifier = ">=6.2.0" }]
 
 [[package]]
 name = "durationpy"
