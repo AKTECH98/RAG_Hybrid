@@ -6,6 +6,7 @@ eval runs only pay for text that was never embedded before.
 
 import hashlib
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Protocol
 
@@ -35,6 +36,7 @@ class EmbeddingCache:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.lock = threading.Lock()
         self.conn.execute("CREATE TABLE IF NOT EXISTS emb (key TEXT PRIMARY KEY, vec BLOB)")
 
     def get_many(self, keys: list[str]) -> dict[str, np.ndarray]:
@@ -42,16 +44,19 @@ class EmbeddingCache:
         for i in range(0, len(keys), 900):  # SQLite variable limit
             batch = keys[i : i + 900]
             q = f"SELECT key, vec FROM emb WHERE key IN ({','.join('?' * len(batch))})"
-            for key, blob in self.conn.execute(q, batch):
+            with self.lock:
+                rows = self.conn.execute(q, batch).fetchall()
+            for key, blob in rows:
                 found[key] = np.frombuffer(blob, dtype=np.float32)
         return found
 
     def put_many(self, items: dict[str, np.ndarray]) -> None:
-        self.conn.executemany(
-            "INSERT OR REPLACE INTO emb VALUES (?, ?)",
-            [(k, v.astype(np.float32).tobytes()) for k, v in items.items()],
-        )
-        self.conn.commit()
+        with self.lock:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO emb VALUES (?, ?)",
+                [(k, v.astype(np.float32).tobytes()) for k, v in items.items()],
+            )
+            self.conn.commit()
 
 
 class OpenAIEmbedder:

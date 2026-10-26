@@ -7,6 +7,7 @@ eval or a demo with identical inputs costs nothing and returns identical outputs
 import hashlib
 import json
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Protocol, TypeVar
 
@@ -29,6 +30,7 @@ class ResponseCache:
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.lock = threading.Lock()
         self.conn.execute("CREATE TABLE IF NOT EXISTS resp (key TEXT PRIMARY KEY, body TEXT)")
 
     @staticmethod
@@ -36,12 +38,14 @@ class ResponseCache:
         return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
 
     def get(self, key: str) -> str | None:
-        row = self.conn.execute("SELECT body FROM resp WHERE key = ?", (key,)).fetchone()
+        with self.lock:
+            row = self.conn.execute("SELECT body FROM resp WHERE key = ?", (key,)).fetchone()
         return row[0] if row else None
 
     def put(self, key: str, body: str) -> None:
-        self.conn.execute("INSERT OR REPLACE INTO resp VALUES (?, ?)", (key, body))
-        self.conn.commit()
+        with self.lock:
+            self.conn.execute("INSERT OR REPLACE INTO resp VALUES (?, ?)", (key, body))
+            self.conn.commit()
 
 
 class OpenAILLM:
