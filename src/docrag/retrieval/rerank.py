@@ -8,6 +8,7 @@ scores as the retrieval-confidence signal.
 """
 
 import math
+import threading
 from functools import lru_cache
 from typing import Protocol
 
@@ -35,11 +36,13 @@ class CrossEncoderReranker:
 
     def __init__(self, model_name: str):
         self.model = _load_cross_encoder(model_name)
+        self._lock = threading.Lock()  # one torch model shared by concurrent requests
 
     def score(self, query: str, chunks: list[Chunk]) -> list[float]:
         if not chunks:
             return []
-        logits = self.model.predict([(query, c.embed_text) for c in chunks])
+        with self._lock:
+            logits = self.model.predict([(query, c.embed_text) for c in chunks])
         return [1.0 / (1.0 + math.exp(-float(x))) for x in logits]
 
 

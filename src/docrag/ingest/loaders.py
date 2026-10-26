@@ -111,6 +111,8 @@ def _expand_admonitions(lines: list[str]) -> list[str]:
 def load_markdown(path: Path) -> tuple[str, list[Section]]:
     text = path.read_text(encoding="utf-8")
     text = re.sub(r"\A---\n.*?\n---\n", "", text, flags=re.S)  # front matter
+    text = re.sub(r"<!--.*?-->\n?", "", text, flags=re.S)  # <!-- fmt:off --> etc.
+    text = re.sub(r"^\[\]\(\)\{#[\w-]+\}\s*$\n?", "", text, flags=re.M)  # mkdocs anchors
     lines = _expand_admonitions(text.splitlines())
 
     builder = SectionBuilder()

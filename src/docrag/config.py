@@ -25,7 +25,8 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     embedding_model: str = "text-embedding-3-small"
     generation_model: str = "gpt-4o"
-    judge_model: str = "gpt-4o-mini"
+    judge_model: str = "gpt-4o-mini"  # system-side reranking / citation verification
+    eval_judge_model: str = "gpt-4o"  # offline eval judge, deliberately a different model
 
     # --- Paths ---
     data_dir: Path = PROJECT_ROOT / "data"
@@ -51,7 +52,7 @@ class Settings(BaseSettings):
 
     # --- Retrieval ---
     retrieval_mode: RetrievalMode = "hybrid"
-    top_k: int = 10
+    top_k: int = 20  # per-retriever search depth (never below rerank_candidates)
     rrf_k: int = 60
     dense_weight: float = 0.7
     sparse_weight: float = 0.3

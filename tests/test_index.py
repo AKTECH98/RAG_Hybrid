@@ -76,3 +76,15 @@ def test_chunk_store_persists_to_jsonl(indexer, settings):
 
     reloaded = ChunkStore("semantic", settings)
     assert set(reloaded.chunks) == set(indexer.index("semantic").chunks.chunks)
+
+
+def test_concurrent_queries_do_not_deadlock(indexer, embedder):
+    """Regression: 8 threads querying Chroma's embedded client at once used to hang."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    indexer.index_documents(_docs(), ("recursive",))
+    vectors = indexer.index("recursive").vectors
+    queries = [embedder.embed([f"timeout handlers query {i}"])[0] for i in range(64)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda v: vectors.query(v, 3), queries))
+    assert len(results) == 64 and all(len(r) == 3 for r in results)

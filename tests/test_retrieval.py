@@ -150,3 +150,43 @@ def test_reranker_reorders_fused_candidates(retriever):
     assert res.results[0].rerank_score == 1.0
     assert [c.final_rank for c in res.results] == list(range(1, len(res.results) + 1))
     assert len(res.candidates) == 4  # tiny corpus: every chunk is a candidate
+
+
+def test_reranker_is_built_once_under_concurrency(retriever, monkeypatch):
+    """Regression: parallel first calls each loaded the cross-encoder and crashed torch."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    import docrag.retrieval.pipeline as pipeline
+
+    builds = []
+    lock = threading.Lock()
+
+    def slow_build(name, llm, settings):
+        with lock:
+            builds.append(name)
+        time.sleep(0.05)
+        return None
+
+    monkeypatch.setattr(pipeline, "get_reranker", slow_build)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda _: retriever._reranker("cross_encoder"), range(16)))
+    assert builds == ["cross_encoder"]
+
+
+def test_dense_weight_override_and_equal_fetch_depth(retriever, settings):
+    q = "configure client timeout"
+    sparse_only = retriever.retrieve(q, strategy="recursive", reranker="none", dense_weight=0.0)
+    assert [c.chunk.chunk_id for c in sparse_only.candidates][: len(sparse_only.candidates)] == [
+        c.chunk.chunk_id
+        for c in sorted(
+            [c for c in sparse_only.candidates if c.sparse_rank], key=lambda c: c.sparse_rank
+        )
+    ]
+    # hybrid searches as deep as dense-only: every chunk dense-only sees, hybrid sees too
+    hybrid = retriever.retrieve(q, strategy="recursive", reranker="none")
+    dense = retriever.retrieve(q, strategy="recursive", mode="dense", reranker="none")
+    assert {c.chunk.chunk_id for c in dense.candidates if c.dense_rank} <= {
+        c.chunk.chunk_id for c in hybrid.candidates if c.dense_rank
+    }

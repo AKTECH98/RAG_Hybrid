@@ -8,3 +8,6 @@ data/
 corpus/
 reports/*.json
 .DS_Store
+reports/*.log
+reports/eval_*.md
+reports/latest.md

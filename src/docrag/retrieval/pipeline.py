@@ -5,6 +5,7 @@ eval can show exactly where a chunk came from and how each stage moved it.
 """
 
 import sys
+import threading
 import time
 
 from pydantic import BaseModel
@@ -43,11 +44,15 @@ class Retriever:
         self.embedder = embedder
         self.llm = llm
         self._rerankers: dict[str, Reranker | None] = {}
+        self._reranker_lock = threading.Lock()
 
     def _reranker(self, name: RerankerName) -> Reranker | None:
-        if name not in self._rerankers:
-            self._rerankers[name] = get_reranker(name, self.llm, self.settings)
-        return self._rerankers[name]
+        # Locked: concurrent first calls would each load the cross-encoder, and parallel
+        # torch model loads crash the process.
+        with self._reranker_lock:
+            if name not in self._rerankers:
+                self._rerankers[name] = get_reranker(name, self.llm, self.settings)
+            return self._rerankers[name]
 
     def retrieve(
         self,
@@ -58,20 +63,20 @@ class Retriever:
         reranker: RerankerName | None = None,
         top_k: int | None = None,
         top_n: int | None = None,
+        dense_weight: float | None = None,
     ) -> RetrievalResult:
         s = self.settings
         mode = mode or s.retrieval_mode
         strategy = strategy or s.default_strategy
         reranker = reranker or s.reranker
-        top_k = top_k or s.top_k
         top_n = top_n or s.rerank_top_n
         pool = max(s.rerank_candidates, top_n)
+        # Every retriever searches at least as deep as the reranker pool, in every mode, so
+        # hybrid never sees less of the dense ranking than dense-only does. (Eval finding:
+        # with 10 per retriever, recursive-chunk evidence at dense ranks 11-20 was lost.)
+        fetch = max(top_k or s.top_k, pool)
         idx = self.indexer.index(strategy)
         timings: dict[str, float] = {}
-
-        # A single retriever gets the whole candidate budget, so "dense only" vs "hybrid"
-        # comparisons hand the reranker the same number of candidates.
-        fetch = top_k if mode == "hybrid" else max(top_k, pool)
 
         t = time.perf_counter()
         dense = dense_search(idx.vectors, self.embedder, query, fetch) if mode != "sparse" else []
@@ -80,11 +85,11 @@ class Retriever:
         sparse = sparse_search(idx.bm25, query, fetch) if mode != "dense" else []
         timings["sparse"] = (time.perf_counter() - t) * 1000
 
-        weights = (
-            {"dense": s.dense_weight, "sparse": s.sparse_weight}
-            if mode == "hybrid"
-            else {mode: 1.0}
-        )
+        # Note: the fused list is cut to `pool`, so with weights w_d > w_s a sparse-only hit
+        # can only enter the pool if w_s/(k + r_s) beats the weakest dense hit kept.
+        w_d = s.dense_weight if dense_weight is None else dense_weight
+        w_s = s.sparse_weight if dense_weight is None else 1.0 - dense_weight
+        weights = {"dense": w_d, "sparse": w_s} if mode == "hybrid" else {mode: 1.0}
         fused = weighted_rrf(
             {"dense": [cid for cid, _ in dense], "sparse": [cid for cid, _ in sparse]},
             weights,

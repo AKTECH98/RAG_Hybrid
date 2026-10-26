@@ -57,9 +57,21 @@ class OpenAILLM:
             raise RuntimeError("OPENAI_API_KEY is not set (add it to .env)")
         self.client = OpenAI(api_key=s.openai_api_key, max_retries=5, timeout=120)
         self.cache = ResponseCache(s.cache_dir / "llm.sqlite") if use_cache else None
+        # tokens actually billed (cache hits excluded), per model
+        self.usage: dict[str, dict[str, int]] = {}
+        self._usage_lock = threading.Lock()
 
     def _messages(self, system: str, user: str) -> list[dict]:
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+    def _record(self, model: str, usage) -> None:
+        if usage is None:
+            return
+        with self._usage_lock:
+            u = self.usage.setdefault(model, {"input": 0, "output": 0, "calls": 0})
+            u["input"] += usage.prompt_tokens
+            u["output"] += usage.completion_tokens
+            u["calls"] += 1
 
     def generate(self, model: str, system: str, user: str, temperature: float = 0.0) -> str:
         key = ResponseCache.key(kind="text", model=model, s=system, u=user, t=temperature)
@@ -68,6 +80,7 @@ class OpenAILLM:
         resp = self.client.chat.completions.create(
             model=model, messages=self._messages(system, user), temperature=temperature
         )
+        self._record(model, resp.usage)
         text = resp.choices[0].message.content or ""
         if self.cache:
             self.cache.put(key, text)
@@ -92,6 +105,7 @@ class OpenAILLM:
             response_format=schema,
             temperature=temperature,
         )
+        self._record(model, resp.usage)
         msg = resp.choices[0].message
         if msg.parsed is None:
             raise RuntimeError(f"Model refused or returned no parsable output: {msg.refusal}")

@@ -167,3 +167,14 @@ def test_document_store_roundtrip(settings, tmp_path):
     assert store.get("team/note.md") == doc
     assert [d.doc_id for d in store.list()] == ["team/note.md"]
     assert store.delete("team/note.md") and store.get("team/note.md") is None
+
+
+def test_markdown_strips_html_comments_and_anchor_markers(tmp_path):
+    path = tmp_path / "strict.md"
+    path.write_text(
+        "# Strict\n\nIntro.\n\n<!-- old anchor -->\n<!-- markdownlint-disable -->\n"
+        "[](){#strict-mode-with-field}\n\n## Field\n\nBody.\n"
+    )
+    doc = load_document(path, "pydantic/strict.md")
+    assert "<!--" not in doc.text and "[](){#" not in doc.text
+    assert [s.text for s in doc.sections] == ["Intro.", "Body."]
