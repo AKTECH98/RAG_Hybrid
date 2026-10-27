@@ -20,6 +20,15 @@ class AskRequest(RetrievalOptions):
     debug: bool = Field(False, description="Also return the whole reranker candidate pool")
 
 
+class VerifyRequest(RetrievalOptions):
+    question: str = Field(min_length=3, max_length=2000)
+    answer: str = Field(
+        min_length=1,
+        max_length=8000,
+        description="Any answer text with [n] markers, e.g. from another system or hand-written",
+    )
+
+
 class RetrieveRequest(RetrievalOptions):
     query: str = Field(min_length=1, max_length=2000)
 

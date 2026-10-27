@@ -271,3 +271,6 @@ def test_model_reported_insufficient_context_abstains(settings):
 def test_low_citation_coverage_caps_label_even_with_strong_retrieval():
     c = composite_confidence(1.0, 0.33, 1.0, (0.4, 0.4, 0.2))
     assert c.composite > 0.7 and c.label == "low"
+    # half the claims failed: strong retrieval and completeness can't make that "high"
+    half = composite_confidence(1.0, 0.5, 1.0, (0.4, 0.4, 0.2))
+    assert half.composite == pytest.approx(0.8) and half.label == "medium"

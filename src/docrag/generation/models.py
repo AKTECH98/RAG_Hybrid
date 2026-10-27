@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 from docrag.models import RetrievedChunk
 
@@ -58,6 +58,7 @@ class Claim(BaseModel):
     invalid_citations: list[int] = Field(default_factory=list)  # [n] with no such source
     checks: list[CitationCheck] = Field(default_factory=list)
 
+    @computed_field  # serialized, so API clients get it without re-deriving
     @property
     def status(self) -> Literal["supported", "partial", "unsupported", "uncited"]:
         if not self.citations:

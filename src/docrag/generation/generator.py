@@ -42,12 +42,17 @@ class Generator:
         )
         return answer
 
-    def answer_from(self, question: str, res: RetrievalResult, verify: bool = True) -> Answer:
-        s = self.settings
-        sources = [
-            Source.from_retrieved(n, rc, calibrated_relevance(rc, s.cosine_band_resolved))
+    def sources_for(self, res: RetrievalResult) -> list[Source]:
+        """The numbered context blocks [1]..[n] for a retrieval result."""
+        band = self.settings.cosine_band_resolved
+        return [
+            Source.from_retrieved(n, rc, calibrated_relevance(rc, band))
             for n, rc in enumerate(res.results, start=1)
         ]
+
+    def answer_from(self, question: str, res: RetrievalResult, verify: bool = True) -> Answer:
+        s = self.settings
+        sources = self.sources_for(res)
         retrieval = retrieval_confidence([src.relevance for src in sources])
         meta = {
             "mode": res.mode,

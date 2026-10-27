@@ -89,9 +89,12 @@ def composite_confidence(
     total = sum(weights) or 1.0
     score = (weights[0] * retrieval + weights[1] * coverage + weights[2] * complete) / total
     label = "high" if score >= 0.75 else "medium" if score >= 0.5 else "low"
-    # Great retrieval can't vouch for an answer whose claims mostly failed verification
+    # Great retrieval can't vouch for an answer whose claims failed verification: "high"
+    # needs most claims backed, and an answer with most claims unbacked is "low".
     if coverage < 0.5:
         label = "low"
+    elif coverage < 0.75 and label == "high":
+        label = "medium"
     return Confidence(
         retrieval=round(retrieval, 3),
         citation_coverage=round(coverage, 3),

@@ -26,8 +26,10 @@ from docrag.api.schemas import (
     RetrieveRequest,
     RetrieveResponse,
     StrategyStats,
+    VerifyRequest,
 )
 from docrag.config import CHUNK_STRATEGIES, ChunkStrategy
+from docrag.generation.confidence import retrieval_confidence
 from docrag.ingest.loaders import supported
 from docrag.models import Document
 
@@ -102,6 +104,25 @@ def create_app(services_factory: Callable[[], Services] = build_services) -> Fas
                 Candidate.from_retrieved(c, final.get(c.chunk.chunk_id)) for c in res.candidates
             ]
         return out
+
+    @app.post("/v1/verify", response_model=AskResponse, tags=["query"])
+    def verify(req: VerifyRequest, svc: Svc) -> AskResponse:
+        """Audit a given answer instead of generating one: retrieve sources for the question
+        (numbered [1]..[n] exactly as /v1/ask would), then check every claim's citations."""
+        with svc.index_lock:
+            res = svc.retriever.retrieve(
+                req.question,
+                mode=req.mode,
+                strategy=req.strategy,
+                reranker=req.reranker,
+                top_n=req.top_n,
+            )
+        sources = svc.generator.sources_for(res)
+        answer = svc.generator.check_answer(
+            req.question, req.answer, sources, retrieval_confidence([s.relevance for s in sources])
+        )
+        answer.retrieval = {"mode": res.mode, "strategy": res.strategy, "reranker": res.reranker}
+        return AskResponse(**answer.model_dump())
 
     @app.post("/v1/retrieve", response_model=RetrieveResponse, tags=["query"])
     def retrieve(req: RetrieveRequest, svc: Svc) -> RetrieveResponse:

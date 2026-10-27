@@ -184,3 +184,32 @@ def test_healthz(client):
     _upload(client)
     h = client.get("/healthz").json()
     assert h["status"] == "ok" and h["chunks"]["recursive"] > 0
+
+
+def test_verify_flags_a_hallucinated_citation(settings, indexer, embedder):
+    def verdicts(system, user):
+        return {
+            "verdicts": [
+                {"claim_id": 1, "source": 1, "verdict": "supported", "reason": "stated"},
+                {"claim_id": 2, "source": 1, "verdict": "unsupported", "reason": "no 30s in [1]"},
+            ]
+        }
+
+    llm = _llm()
+    llm.structured_handlers["_Verdicts"] = verdicts
+    with _client(settings, indexer, embedder, llm=llm) as c:
+        _upload(c)
+        r = c.post(
+            "/v1/verify",
+            json={
+                "question": "How do I return a 404?",
+                "answer": "Raise `HTTPException` with a `status_code` [1]. "
+                "The default timeout is 30 seconds [1].",
+            },
+        )
+    ans = r.json()
+    assert r.status_code == 200, r.text
+    assert [c["status"] for c in ans["claims"]] == ["supported", "unsupported"]
+    assert [(u["claim_id"], u["source"]) for u in ans["unsupported_citations"]] == [(2, 1)]
+    assert ans["confidence"]["label"] in {"medium", "low"}
+    assert not any(llm_call[0] == "text" for llm_call in llm.calls)  # nothing generated

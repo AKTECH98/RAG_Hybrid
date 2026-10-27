@@ -189,7 +189,7 @@ def render_confidence(conf: dict) -> None:
 def render_claims(claims: list[dict]) -> None:
     rows = []
     for c in claims:
-        status = _claim_status(c) if c["citations"] else "uncited"
+        status = c["status"]
         rows.append(
             {
                 "": STATUS_ICON[status],
@@ -202,14 +202,6 @@ def render_claims(claims: list[dict]) -> None:
         )
     with st.expander(f"Claims and citation checks ({len(claims)})", expanded=False):
         st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-
-
-def _claim_status(claim: dict) -> str:
-    verdicts = {k["verdict"] for k in claim["checks"]}
-    for v in ("supported", "partial"):
-        if v in verdicts:
-            return v
-    return "unsupported"
 
 
 def render_sources(sources: list[dict], key: str) -> None:
@@ -304,6 +296,24 @@ def ask_tab(opts: dict) -> None:
             with st.spinner(f"Answering ({mode})… a local model can take up to a minute"):
                 results.append((mode, api("POST", "/v1/ask", json=b)))
         st.session_state["results"] = results
+
+    with st.expander("Audit an answer: check any text's citations against the sources"):
+        with st.form("verify"):
+            st.caption(
+                "Sources are retrieved for the question and numbered [1]..[n] exactly as for "
+                "Ask (open *Sources* after a normal answer to see them). Paste or edit an "
+                "answer with [n] markers, e.g. one with a made-up detail, and every claim is "
+                "checked against the source it cites."
+            )
+            audit_q = st.text_input("Question", value=question)
+            audit_a = st.text_area("Answer to check", height=120)
+            if st.form_submit_button("Check citations") and audit_q.strip() and audit_a.strip():
+                body = {k: opts[k] for k in ("strategy", "mode", "reranker", "top_n")}
+                with st.spinner("Verifying every cited claim…"):
+                    res = api(
+                        "POST", "/v1/verify", json=body | {"question": audit_q, "answer": audit_a}
+                    )
+                st.session_state["results"] = [("audit", res)]
 
     results = [(m, r) for m, r in st.session_state.get("results", []) if r]
     if not results:
