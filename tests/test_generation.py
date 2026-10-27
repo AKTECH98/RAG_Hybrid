@@ -1,6 +1,11 @@
 import pytest
 
-from docrag.generation.citations import extract_citations, parse_claims
+from docrag.generation.citations import (
+    VERIFY_ROUNDS,
+    extract_citations,
+    parse_claims,
+    verify_claims,
+)
 from docrag.generation.confidence import (
     calibrated_relevance,
     citation_coverage,
@@ -8,7 +13,7 @@ from docrag.generation.confidence import (
     retrieval_confidence,
 )
 from docrag.generation.generator import Generator
-from docrag.generation.models import CitationCheck, Claim
+from docrag.generation.models import CitationCheck, Claim, Source
 from docrag.models import Chunk, RetrievedChunk
 from docrag.retrieval.pipeline import RetrievalResult
 
@@ -204,6 +209,44 @@ def test_missing_judge_verdict_counts_as_unsupported(settings):
     ans = Generator(None, llm, settings).answer_from("q", GOOD)
     assert ans.claims[0].checks[0].verdict == "unsupported"
     assert "no verdict" in ans.claims[0].checks[0].reason
+    assert sum(c[0] == "_Verdicts" for c in llm.calls) == VERIFY_ROUNDS
+
+
+def test_skipped_pairs_are_asked_again_alone():
+    claims = parse_claims("Raise `HTTPException` [1]. The default timeout is 5 seconds [2].", 2)
+    sources = [
+        Source(
+            n=1,
+            chunk_id="a",
+            doc_id="d",
+            heading="A",
+            page=None,
+            label="d › A",
+            text="Raise HTTPException.",
+            relevance=1.0,
+        ),
+        Source(
+            n=2,
+            chunk_id="b",
+            doc_id="d",
+            heading="B",
+            page=None,
+            label="d › B",
+            text="Timeout defaults to 5s.",
+            relevance=1.0,
+        ),
+    ]
+    first = {"claim_id": 1, "source": 1, "verdict": "supported", "reason": "stated"}
+    second = {"claim_id": 2, "source": 2, "verdict": "supported", "reason": "stated"}
+    replies = iter([{"verdicts": [first]}, {"verdicts": [second]}])
+    llm = FakeLLM({"_Verdicts": lambda s, u: next(replies)})
+
+    checks = verify_claims(llm, "m", "q", claims, sources)
+
+    assert [c.verdict for c in checks] == ["supported", "supported"]
+    retry_prompt = llm.calls[1][2]
+    assert "Claim 2" in retry_prompt and "Claim 1" not in retry_prompt
+    assert "[2] d › B" in retry_prompt and "[1] d › A" not in retry_prompt
 
 
 def test_low_retrieval_confidence_abstains_without_generating(settings):

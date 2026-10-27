@@ -115,19 +115,29 @@ that adds a default value, version, or recommendation absent from the source is 
 "supported". Give a one-sentence reason. Return exactly one verdict per listed pair."""
 
 
-def verify_claims(
-    llm: LLM, model: str, question: str, claims: list[Claim], sources: list[Source]
-) -> list[CitationCheck]:
-    pairs = [(c.id, n) for c in claims for n in c.citations]
-    if not pairs:
-        return []
+# Small judges (qwen3-4b) often return verdicts for only some of the listed pairs; the
+# skipped ones are asked again on their own before being scored as unsupported.
+VERIFY_ROUNDS = 3
+
+
+def _ask_verdicts(
+    llm: LLM,
+    model: str,
+    question: str,
+    claims: list[Claim],
+    pairs: list[tuple[int, int]],
+    sources: list[Source],
+) -> list[_Verdict]:
     by_n = {s.n: s for s in sources}
+    by_id = {c.id: c for c in claims}
     cited = sorted({n for _, n in pairs})
     source_text = "\n\n".join(f"[{n}] {by_n[n].label}\n{by_n[n].text}" for n in cited)
+    wanted: dict[int, list[int]] = {}
+    for claim_id, n in pairs:
+        wanted.setdefault(claim_id, []).append(n)
     claim_text = "\n".join(
-        f"Claim {c.id}: {c.text}\n  -> check against sources {c.citations}"
-        for c in claims
-        if c.citations
+        f"Claim {cid}: {by_id[cid].text}\n  -> check against sources {ns}"
+        for cid, ns in wanted.items()
     )
     result = llm.structured(
         model,
@@ -136,7 +146,23 @@ def verify_claims(
         f"Claims to verify:\n{claim_text}",
         _Verdicts,
     )
-    got = {(v.claim_id, v.source): v for v in result.verdicts}
+    return result.verdicts
+
+
+def verify_claims(
+    llm: LLM, model: str, question: str, claims: list[Claim], sources: list[Source]
+) -> list[CitationCheck]:
+    pairs = [(c.id, n) for c in claims for n in c.citations]
+    if not pairs:
+        return []
+    got: dict[tuple[int, int], _Verdict] = {}
+    for _ in range(VERIFY_ROUNDS):
+        todo = [p for p in pairs if p not in got]
+        if not todo:
+            break
+        for v in _ask_verdicts(llm, model, question, claims, todo, sources):
+            if (v.claim_id, v.source) in todo:  # ignore verdicts for pairs nobody asked about
+                got[(v.claim_id, v.source)] = v
     checks = []
     for claim_id, n in pairs:
         v = got.get((claim_id, n))
