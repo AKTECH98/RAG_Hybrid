@@ -176,3 +176,30 @@ def test_retrieval_only_run_skips_generation_and_reports(indexer, embedder, sett
     )
     assert "Abstain AUC" in md and "Faithful" not in md  # empty columns are hidden
     assert "Score separation" in md and "Evidence missed" in md
+
+
+def test_ollama_retries_server_errors_but_not_client_errors(settings, monkeypatch):
+    import docrag.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod, "RETRY_DELAYS_S", (0.0, 0.0))
+    crash = {"error": "model runner has unexpectedly stopped"}
+    statuses = iter([500, 500, 200])
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        code = next(statuses)
+        return httpx.Response(code, json=_msg("ok") if code == 200 else crash)
+
+    llm = OllamaLLM(settings, use_cache=False)
+    llm.client = httpx.Client(transport=httpx.MockTransport(flaky), base_url="http://x")
+    assert llm.generate("qwen", "s", "u") == "ok"  # recovered after two runner crashes
+
+    calls = []
+
+    def not_found(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(404, json={"error": "model 'nope' not found"})
+
+    llm.client = httpx.Client(transport=httpx.MockTransport(not_found), base_url="http://x")
+    with pytest.raises(RuntimeError, match="404"):
+        llm.generate("nope", "s", "u")
+    assert len(calls) == 1  # no retry on a client error

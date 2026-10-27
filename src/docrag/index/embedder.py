@@ -180,12 +180,12 @@ class OllamaEmbedder(CachedEmbedder):
         )
 
     def _embed_batch(self, texts: list[str]) -> np.ndarray:
-        resp = self.client.post(
-            "/api/embed", json={"model": self.model, "input": texts, "truncate": True}
+        from docrag.llm import ollama_post
+
+        data = ollama_post(
+            self.client, "/api/embed", {"model": self.model, "input": texts, "truncate": True}
         )
-        if resp.status_code != 200:
-            raise RuntimeError(f"Ollama embed failed ({resp.status_code}): {resp.text[:300]}")
-        return np.array(resp.json()["embeddings"], dtype=np.float32)
+        return np.array(data["embeddings"], dtype=np.float32)
 
 
 class HashEmbedder:

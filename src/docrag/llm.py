@@ -8,6 +8,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Protocol, TypeVar
 
@@ -114,6 +115,35 @@ class OpenAILLM:
         return msg.parsed
 
 
+RETRY_DELAYS_S = (5.0, 20.0)
+
+
+def ollama_post(client, path: str, body: dict) -> dict:
+    """POST to Ollama, retrying transient failures.
+
+    On a small box (8 GB Jetson) the model runner can crash under memory pressure ("model
+    runner has unexpectedly stopped", HTTP 500); Ollama reloads it on the next request, so
+    a short wait and retry usually succeeds. 4xx errors (bad model name, bad schema) fail
+    immediately.
+    """
+    import httpx
+
+    for attempt in range(len(RETRY_DELAYS_S) + 1):
+        try:
+            resp = client.post(path, json=body)
+        except (httpx.TransportError, httpx.TimeoutException) as e:
+            error: str = f"{type(e).__name__}: {e}"
+        else:
+            if resp.status_code == 200:
+                return resp.json()
+            error = f"HTTP {resp.status_code}: {resp.text[:300]}"
+            if resp.status_code < 500:
+                break
+        if attempt < len(RETRY_DELAYS_S):
+            time.sleep(RETRY_DELAYS_S[attempt])
+    raise RuntimeError(f"Ollama {path} failed: {error}")
+
+
 class OllamaLLM:
     """Ollama via its native /api/chat endpoint.
 
@@ -144,10 +174,7 @@ class OllamaLLM:
         }
         if fmt is not None:
             body["format"] = fmt
-        resp = self.client.post("/api/chat", json=body)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Ollama chat failed ({resp.status_code}): {resp.text[:300]}")
-        data = resp.json()
+        data = ollama_post(self.client, "/api/chat", body)
         prompt_tokens = data.get("prompt_eval_count", 0)
         if prompt_tokens >= self.num_ctx:
             raise RuntimeError(
