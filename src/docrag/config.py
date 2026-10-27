@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     ollama_num_ctx: int = 8192
     ollama_think: bool = False
     ollama_timeout_s: float = 900.0
+    # Concurrent chat requests from this process. An 8 GB box runs out of memory with two
+    # 8k-context requests in flight ("model runner has unexpectedly stopped").
+    ollama_max_parallel: int = 1
 
     # --- Embeddings ---
     embedding_provider: EmbeddingProvider = "openai"
@@ -94,6 +97,10 @@ class Settings(BaseSettings):
     rerank_top_n: int = 5
     reranker: RerankerName = "llm"
     cross_encoder_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+    # --- API ---
+    api_key: str | None = None  # if set, ingest/delete require the X-API-Key header
+    max_upload_mb: int = 20
 
     # --- Generation / confidence ---
     abstain_threshold: float = 0.35

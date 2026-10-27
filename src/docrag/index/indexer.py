@@ -16,7 +16,7 @@ from docrag.index.bm25_store import BM25Store
 from docrag.index.chunk_store import ChunkStore
 from docrag.index.dedup import Duplicate, split_duplicates
 from docrag.index.embedder import Embedder
-from docrag.index.vector_store import VectorStore, get_chroma_client
+from docrag.index.vector_store import VectorStore, collection_name, get_chroma_client
 from docrag.models import Chunk, Document
 
 
@@ -53,7 +53,9 @@ class StrategyIndex:
     def __init__(self, strategy: ChunkStrategy, settings: Settings, client=None):
         self.strategy = strategy
         self.chunks = ChunkStore(strategy, settings)
-        self.vectors = VectorStore(strategy, client or get_chroma_client(settings))
+        self.vectors = VectorStore(
+            strategy, client or get_chroma_client(settings), collection_name(strategy, settings)
+        )
         self.bm25 = BM25Store(self.chunks)
 
 
@@ -126,7 +128,7 @@ class Indexer:
 
     def reset(self, strategy: ChunkStrategy) -> None:
         idx = self.index(strategy)
-        self.client.delete_collection(f"chunks_{strategy}")
+        self.client.delete_collection(idx.vectors.name)
         idx.chunks.path.unlink(missing_ok=True)
         self._indexes.pop(strategy)
 

@@ -163,6 +163,7 @@ class OllamaLLM:
         self.cache = ResponseCache(s.cache_dir / "llm.sqlite") if use_cache else None
         self.usage: dict[str, dict[str, int]] = {}
         self._usage_lock = threading.Lock()
+        self._slots = threading.Semaphore(s.ollama_max_parallel)
 
     def _chat(self, model: str, system: str, user: str, temperature: float, fmt=None) -> str:
         body = {
@@ -174,7 +175,8 @@ class OllamaLLM:
         }
         if fmt is not None:
             body["format"] = fmt
-        data = ollama_post(self.client, "/api/chat", body)
+        with self._slots:
+            data = ollama_post(self.client, "/api/chat", body)
         prompt_tokens = data.get("prompt_eval_count", 0)
         if prompt_tokens >= self.num_ctx:
             raise RuntimeError(

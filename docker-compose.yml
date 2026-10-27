@@ -1,0 +1,69 @@
+# docker compose up --build
+#
+#   chroma     vector store server
+#   seed       one-shot: fetch the corpus (if ./corpus is empty) and build the indexes
+#   api        FastAPI on http://localhost:8000 (docs at /docs)
+#   dashboard  Streamlit on http://localhost:8501
+#
+# Models are configured in .env exactly as for a local run (OpenAI, or an Ollama server
+# such as DOCRAG_OLLAMA_BASE_URL=http://<host>:11434). ./data is shared with local runs, so
+# the embedding and LLM caches carry over and seeding a fresh Chroma server is quick.
+
+x-docrag: &docrag
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.api
+  image: docrag-api
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    DOCRAG_CHROMA_MODE: http
+    DOCRAG_CHROMA_HOST: chroma
+    DOCRAG_CHROMA_PORT: "8000"
+  volumes:
+    - ./data:/app/data
+    - ./corpus:/app/corpus
+
+services:
+  chroma:
+    image: chromadb/chroma:1.5.9  # keep in step with the chromadb client in uv.lock
+    volumes:
+      - chroma-data:/data
+    ports:
+      - "8001:8000"
+
+  seed:
+    <<: *docrag
+    command: >
+      sh -c "python scripts/fetch_corpus.py && python scripts/seed.py --reuse-chunks"
+    depends_on:
+      - chroma
+    restart: "no"
+
+  api:
+    <<: *docrag
+    ports:
+      - "8000:8000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dashboard
+    image: docrag-dashboard
+    environment:
+      DOCRAG_API_URL: http://api:8000
+      DOCRAG_REPORTS_DIR: /app/reports
+    volumes:
+      - ./reports:/app/reports:ro
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  chroma-data:

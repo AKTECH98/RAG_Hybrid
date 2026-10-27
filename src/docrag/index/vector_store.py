@@ -7,6 +7,7 @@ is negligible next to the LLM calls around them.
 """
 
 import threading
+import time
 
 import chromadb
 import numpy as np
@@ -26,9 +27,7 @@ def get_chroma_client(settings: Settings | None = None) -> chromadb.ClientAPI:
         if s.chroma_mode == "http":
             key = f"http://{s.chroma_host}:{s.chroma_port}"
             if key not in _clients:
-                _clients[key] = chromadb.HttpClient(
-                    host=s.chroma_host, port=s.chroma_port, settings=chroma_settings
-                )
+                _clients[key] = _connect_http(s, chroma_settings)
         else:
             key = str(s.chroma_dir)
             if key not in _clients:
@@ -36,12 +35,37 @@ def get_chroma_client(settings: Settings | None = None) -> chromadb.ClientAPI:
         return _clients[key]
 
 
+def _connect_http(s: Settings, chroma_settings: ChromaSettings, wait_s: float = 60.0):
+    """Connect to a Chroma server, waiting for it to come up (docker-compose start order)."""
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            client = chromadb.HttpClient(
+                host=s.chroma_host, port=s.chroma_port, settings=chroma_settings
+            )
+            client.heartbeat()
+            return client
+        except Exception:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(2)
+
+
+def collection_name(strategy: str, settings: Settings) -> str:
+    """Embedded mode keeps one Chroma directory per embedder; a shared server needs the
+    embedder in the collection name instead (vectors from different models can't mix)."""
+    if settings.chroma_mode == "http":
+        return f"{settings.index_slug}.chunks_{strategy}"
+    return f"chunks_{strategy}"
+
+
 class VectorStore:
-    def __init__(self, strategy: str, client: chromadb.ClientAPI):
+    def __init__(self, strategy: str, client: chromadb.ClientAPI, name: str | None = None):
         self.strategy = strategy
+        self.name = name or f"chunks_{strategy}"
         with _lock:
             self.collection = client.get_or_create_collection(
-                f"chunks_{strategy}",
+                self.name,
                 configuration={"hnsw": {"space": "cosine"}},
                 embedding_function=None,  # we always pass our own vectors
             )

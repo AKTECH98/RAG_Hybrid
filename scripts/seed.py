@@ -5,6 +5,7 @@ Usage:
   uv run python scripts/seed.py --strategy recursive  # just one
   uv run python scripts/seed.py --reset               # wipe indexes first
   uv run python scripts/seed.py --embedder local      # index with another embedder
+  uv run python scripts/seed.py --reuse-chunks        # only sync vectors to existing chunks
 
 Each embedder gets its own index under data/index/<provider>-<model>/.
 """
@@ -30,6 +31,12 @@ def main() -> None:
         "--embedder", choices=EMBEDDING_PROVIDERS, help="defaults to DOCRAG_EMBEDDING_PROVIDER"
     )
     parser.add_argument("--embedding-model", help="override the provider's default model")
+    parser.add_argument(
+        "--reuse-chunks",
+        action="store_true",
+        help="strategies that already have a chunk store are not re-chunked; their vectors are "
+        "synced to it instead (fast with a warm embedding cache, e.g. a fresh Chroma server)",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -38,21 +45,34 @@ def main() -> None:
     print(f"Embedder: {settings.embedding_provider} / {settings.embedding_model_name}")
     corpus = args.corpus or settings.corpus_dir
     strategies = CHUNK_STRATEGIES if args.strategy == "all" else (args.strategy,)
-    files = sorted(p for p in corpus.rglob("*") if p.is_file() and supported(p))
-    if not files:
-        raise SystemExit(f"No supported files in {corpus}. Run scripts/fetch_corpus.py first.")
 
     t0 = time.time()
-    store = DocumentStore(settings)
-    docs = [store.ingest_file(p, p.relative_to(corpus).as_posix()) for p in files]
-    formats = Counter(d.format for d in docs)
-    print(f"Loaded {len(docs)} documents {dict(formats)} in {time.time() - t0:.1f}s")
-
     indexer = Indexer(get_embedder(settings), settings)
     if args.reset:
         settings.index_dir.joinpath("dedup_log.jsonl").unlink(missing_ok=True)
         for s in strategies:
             indexer.reset(s)
+
+    if args.reuse_chunks and not args.reset:
+        reuse = tuple(s for s in strategies if indexer.index(s).chunks.chunks)
+        for strategy in reuse:
+            sync = indexer.repair(strategy)
+            print(
+                f"{strategy:<10} reused {sync.chunk_store} chunks; vectors {sync.vector_store} "
+                f"({'in sync' if sync.in_sync else 'DRIFT'})"
+            )
+        strategies = tuple(s for s in strategies if s not in reuse)
+        if not strategies:
+            print(f"\nDone in {time.time() - t0:.1f}s. Data in {settings.data_dir}")
+            return
+
+    files = sorted(p for p in corpus.rglob("*") if p.is_file() and supported(p))
+    if not files:
+        raise SystemExit(f"No supported files in {corpus}. Run scripts/fetch_corpus.py first.")
+    store = DocumentStore(settings)
+    docs = [store.ingest_file(p, p.relative_to(corpus).as_posix()) for p in files]
+    formats = Counter(d.format for d in docs)
+    print(f"Loaded {len(docs)} documents {dict(formats)} in {time.time() - t0:.1f}s")
 
     print(f"\n{'strategy':<10} {'chunks':>7} {'dupes':>6} {'vectors':>8} {'bm25':>6}  sync   time")
     for strategy in strategies:
